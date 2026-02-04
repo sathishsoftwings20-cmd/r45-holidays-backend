@@ -24,30 +24,23 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (like mobile apps or curl requests)
       if (!origin) return callback(null, true);
 
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-
-      // Check without trailing slash
       const normalizedOrigin = origin.endsWith("/")
         ? origin.slice(0, -1)
         : origin;
 
       const isAllowed = allowedOrigins.some((allowed) => {
+        if (!allowed) return false;
         const normalizedAllowed = allowed.endsWith("/")
           ? allowed.slice(0, -1)
           : allowed;
         return normalizedAllowed === normalizedOrigin;
       });
 
-      if (isAllowed) {
-        return callback(null, true);
-      }
+      if (isAllowed) return callback(null, true);
 
-      console.log(`CORS blocked: ${origin}`);
+      console.log(`❌ CORS blocked: ${origin}`);
       return callback(new Error("Not allowed by CORS"), false);
     },
     credentials: true,
@@ -83,7 +76,6 @@ app.use("/api/itinerary", require("./routes/itinerary.routes"));
 app.use((err, req, res, next) => {
   console.error(err.stack);
 
-  // Multer file size error
   if (err instanceof multer.MulterError) {
     if (err.code === "LIMIT_FILE_SIZE") {
       return res.status(400).json({
@@ -91,15 +83,8 @@ app.use((err, req, res, next) => {
         message: "File too large. Maximum size is 10MB",
       });
     }
-    if (err.code === "LIMIT_FILE_COUNT") {
-      return res.status(400).json({
-        success: false,
-        message: "Too many files uploaded",
-      });
-    }
   }
 
-  // Default error
   res.status(err.status || 500).json({
     success: false,
     message: err.message || "Internal Server Error",
@@ -115,10 +100,19 @@ app.use("*", (req, res) => {
   });
 });
 
-// Start server
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📁 Uploads directory: ${path.join(__dirname, "uploads")}`);
-  console.log(`🌍 CORS allowed origins: ${allowedOrigins.join(", ")}`);
-});
+/* ===============================
+   🔥 IMPORTANT FIX STARTS HERE
+   =============================== */
+
+// export app so scripts can reuse it safely
+module.exports = app;
+
+// only start server if this file is run directly
+if (require.main === module) {
+  const PORT = process.env.PORT || 5000;
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`📁 Uploads directory: ${path.join(__dirname, "uploads")}`);
+    console.log(`🌍 CORS allowed origins: ${allowedOrigins.join(", ")}`);
+  });
+}

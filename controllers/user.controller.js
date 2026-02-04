@@ -35,12 +35,11 @@ exports.getUserById = async (req, res, next) => {
 // Create User
 exports.createUser = async (req, res, next) => {
   try {
-    const { fullName, email, userName, password, role, status } = req.body;
+    const { fullName, email, password, role, status } = req.body;
 
     const user = new User({
       fullName,
       email,
-      userName,
       password,
       role: role || "User",
       status: status || "active",
@@ -76,13 +75,6 @@ exports.updateUser = async (req, res, next) => {
       !["Admin", "SuperAdmin"].includes(requester.role)
     ) {
       return res.status(403).json({ message: "Forbidden" });
-    }
-
-    // ❌ Block username update completely
-    if (req.body.userName !== undefined) {
-      return res.status(400).json({
-        message: "Username cannot be changed",
-      });
     }
 
     // Prevent role escalation
