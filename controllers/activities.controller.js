@@ -2,7 +2,7 @@ const path = require("path");
 const fs = require("fs");
 const Activity = require("../models/activities.model");
 const City = require("../models/cities.model");
-
+const { convertINRtoUSDForDisplay } = require("../services/currency.service");
 /**
  * Helper: Resolve City ID safely
  */
@@ -15,11 +15,12 @@ function resolveCityId(input, fallbackId = null) {
   return fallbackId;
 }
 
-// ---------------------- Get All Activities ----------------------
+// ---------------------- Get All Activities (Non-Flight Only) ----------------------
 exports.getAllActivities = async (req, res, next) => {
   try {
     const activities = await Activity.find({
       status: { $ne: "deleted" },
+      isFlight: false,
     })
       .populate({
         path: "city",
@@ -32,7 +33,28 @@ exports.getAllActivities = async (req, res, next) => {
       })
       .sort({ createdAt: -1 });
 
-    res.json(activities);
+    const formatted = await Promise.all(
+      activities.map(async (activity) => {
+        const obj = activity.toObject();
+
+        // Convert base activity price
+        obj.usdPrice = await convertINRtoUSDForDisplay(obj.price);
+
+        // Convert transfer prices
+        if (obj.transfer && obj.transfer.length > 0) {
+          obj.transfer = await Promise.all(
+            obj.transfer.map(async (t) => ({
+              ...t,
+              usdPrice: await convertINRtoUSDForDisplay(t.price),
+            })),
+          );
+        }
+
+        return obj;
+      }),
+    );
+
+    res.json(formatted);
   } catch (err) {
     next(err);
   }
@@ -45,10 +67,7 @@ exports.getActivityById = async (req, res, next) => {
       .populate({
         path: "city",
         select: "name cityId status destination",
-        populate: {
-          path: "destination",
-          select: "name status",
-        },
+        populate: { path: "destination", select: "name status" },
       })
       .populate("createdBy", "name")
       .populate("updatedBy", "name");
@@ -57,12 +76,23 @@ exports.getActivityById = async (req, res, next) => {
       return res.status(404).json({ message: "Activity not found" });
     }
 
-    res.json(activity);
+    const activityObj = activity.toObject();
+    activityObj.usdPrice = await convertINRtoUSDForDisplay(activity.price);
+
+    if (activityObj.transfer) {
+      activityObj.transfer = await Promise.all(
+        activityObj.transfer.map(async (t) => ({
+          ...t,
+          usdPrice: await convertINRtoUSDForDisplay(t.price),
+        })),
+      );
+    }
+
+    res.json(activityObj);
   } catch (err) {
     next(err);
   }
 };
-
 // ---------------------- Create Activity ----------------------
 exports.createActivity = async (req, res, next) => {
   try {
@@ -76,8 +106,11 @@ exports.createActivity = async (req, res, next) => {
       description,
       badge,
       gallery,
+      transfer,
       inclusion,
       exclusion,
+      isFlight,
+      flightType,
     } = req.body;
 
     if (!name || !city) {
@@ -122,11 +155,16 @@ exports.createActivity = async (req, res, next) => {
       description: description || "",
       badge: badge || "Curated Day",
       gallery: Array.isArray(gallery) ? gallery : [],
+      transfer: Array.isArray(transfer) ? transfer : [],
       inclusion: Array.isArray(inclusion) ? inclusion : [],
       exclusion: Array.isArray(exclusion) ? exclusion : [],
       status: ["published", "draft", "deleted"].includes(status)
         ? status
         : "draft",
+      isFlight: Boolean(isFlight),
+      flightType: ["departure", "return"].includes(flightType)
+        ? flightType
+        : null,
       createdBy: req.user.id,
     });
 
@@ -155,8 +193,11 @@ exports.updateActivity = async (req, res, next) => {
       description,
       badge,
       gallery,
+      transfer,
       inclusion,
       exclusion,
+      isFlight,
+      flightType,
     } = req.body;
 
     const activity = await Activity.findById(id);
@@ -202,8 +243,11 @@ exports.updateActivity = async (req, res, next) => {
     if (description !== undefined) activity.description = description;
     if (badge !== undefined) activity.badge = badge;
     if (gallery !== undefined) activity.gallery = gallery;
+    if (transfer !== undefined) activity.transfer = transfer;
     if (inclusion !== undefined) activity.inclusion = inclusion;
     if (exclusion !== undefined) activity.exclusion = exclusion;
+    if (isFlight !== undefined) activity.isFlight = Boolean(isFlight);
+    if (flightType !== undefined) activity.flightType = flightType;
 
     if (
       status !== undefined &&
@@ -355,5 +399,96 @@ exports.deleteActivityGalleryImage = async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
+  }
+};
+
+// ---------------------- Get All Flight Activities ----------------------
+exports.getAllFlights = async (req, res, next) => {
+  try {
+    const flights = await Activity.find({
+      status: { $ne: "deleted" },
+      isFlight: true,
+    })
+      .populate({
+        path: "city",
+        match: { status: { $ne: "deleted" } },
+        select: "name cityId status destination",
+        populate: {
+          path: "destination",
+          select: "name status",
+        },
+      })
+      .sort({ createdAt: -1 });
+
+    const formatted = await Promise.all(
+      flights.map(async (flight) => {
+        const obj = flight.toObject();
+
+        obj.usdPrice = await convertINRtoUSDForDisplay(obj.price);
+
+        if (obj.transfer && obj.transfer.length > 0) {
+          obj.transfer = await Promise.all(
+            obj.transfer.map(async (t) => ({
+              ...t,
+              usdPrice: await convertINRtoUSDForDisplay(t.price),
+            })),
+          );
+        }
+
+        return obj;
+      }),
+    );
+
+    res.json(formatted);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Get activities by city (non-flight only)
+exports.getActivitiesByCity = async (req, res, next) => {
+  try {
+    const { cityId } = req.params;
+
+    // Build filter – only non‑flight activities
+    const filter = {
+      city: cityId,
+      status: { $ne: "deleted" },
+      isFlight: false, // <-- always exclude flights
+    };
+
+    const activities = await Activity.find(filter)
+      .populate({
+        path: "city",
+        match: { status: { $ne: "deleted" } },
+        select: "name cityId status destination",
+        populate: {
+          path: "destination",
+          select: "name status",
+        },
+      })
+      .sort({ createdAt: -1 });
+
+    // Convert INR to USD for display
+    const formatted = await Promise.all(
+      activities.map(async (activity) => {
+        const obj = activity.toObject();
+        obj.usdPrice = await convertINRtoUSDForDisplay(obj.price);
+
+        if (obj.transfer && obj.transfer.length > 0) {
+          obj.transfer = await Promise.all(
+            obj.transfer.map(async (t) => ({
+              ...t,
+              usdPrice: await convertINRtoUSDForDisplay(t.price),
+            })),
+          );
+        }
+        return obj;
+      }),
+    );
+
+    res.json(formatted);
+  } catch (err) {
+    next(err);
   }
 };

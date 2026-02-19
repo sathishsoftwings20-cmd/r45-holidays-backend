@@ -13,12 +13,7 @@ const {
 } = require("../middleware/upload/user/resolveUploadUser.middleware");
 
 // Anyone can register
-router.post(
-  "/",
-  auth,
-  authorizeRoles("SuperAdmin", "Admin"),
-  userController.createUser,
-);
+router.post("/", userController.createUser);
 
 // Get all users - Admin or SuperAdmin
 router.get(
@@ -56,6 +51,7 @@ router.delete(
 router.post(
   "/profile-image",
   auth,
+  authorizeRoles("User", "SuperAdmin", "Admin", "Staff"),
   resolveSelfUser, // 👈 MUST be before multer
   uploadProfile.single("profileImage"),
   userController.uploadProfileImage,

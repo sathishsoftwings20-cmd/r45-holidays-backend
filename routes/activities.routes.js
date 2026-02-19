@@ -12,15 +12,22 @@ const resolveActivity = require("../middleware/upload/activities/resolveActivity
 router.get(
   "/",
   auth,
-  authorizeRoles("SuperAdmin", "Admin", "Staff"),
+  authorizeRoles("SuperAdmin", "Admin", "Staff", "User"),
   activitiesController.getAllActivities,
+);
+// Get all Flights (Admin panel)
+router.get(
+  "/flights",
+  auth,
+  authorizeRoles("SuperAdmin", "Admin", "Staff"),
+  activitiesController.getAllFlights,
 );
 
 // Get single activity
 router.get(
   "/:id",
   auth,
-  authorizeRoles("SuperAdmin", "Admin", "Staff"),
+  authorizeRoles("SuperAdmin", "Admin", "Staff", "User"),
   activitiesController.getActivityById,
 );
 
@@ -72,8 +79,16 @@ router.delete(
 router.delete(
   "/:id",
   auth,
-  authorizeRoles("SuperAdmin"),
+  authorizeRoles("SuperAdmin", "Admin"),
   activitiesController.deleteActivity,
+);
+
+// Get activities by city ID
+router.get(
+  "/city/:cityId",
+  auth,
+  authorizeRoles("SuperAdmin", "Admin", "Staff", "User"),
+  activitiesController.getActivitiesByCity,
 );
 
 module.exports = router;

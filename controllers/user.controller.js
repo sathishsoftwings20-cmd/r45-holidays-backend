@@ -14,8 +14,23 @@ const safeUserResponse = (userDoc) => {
 // Get all users
 exports.getAllUsers = async (req, res, next) => {
   try {
+    const requester = req.user;
+
+    if (!requester) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    // 🔹 Only Admin & SuperAdmin can view all users
+    if (!["Admin", "SuperAdmin"].includes(requester.role)) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+
     const users = await User.find().select("-password");
-    return res.json(users);
+
+    return res.json({
+      count: users.length,
+      users,
+    });
   } catch (error) {
     return next(error);
   }
@@ -35,17 +50,75 @@ exports.getUserById = async (req, res, next) => {
 // Create User
 exports.createUser = async (req, res, next) => {
   try {
-    const { fullName, email, password, role, status } = req.body;
+    const { fullName, email, password, phone, role, status } = req.body;
+
+    // Required field validations
+    if (!fullName) {
+      return res.status(400).json({ message: "Full name is required" });
+    }
+
+    if (!email) {
+      return res.status(400).json({ message: "Email is required" });
+    }
+
+    if (!password) {
+      return res.status(400).json({ message: "Password is required" });
+    }
+
+    if (!phone) {
+      return res.status(400).json({ message: "Phone number is required" });
+    }
+    if (!/^\+\d{10,15}$/.test(phone)) {
+      return res.status(400).json({ message: "Invalid phone number format" });
+    }
+
+    // Email format validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        message: "Invalid email format",
+      });
+    }
+
+    // Password length validation
+    if (password.length < 6) {
+      return res.status(400).json({
+        message: "Password must be at least 6 characters long",
+      });
+    }
+
+    // Check if email already exists
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(409).json({
+        message: "Email already registered",
+      });
+    }
+    // Check if Phone already exists
+    const existingPhoneUser = await User.findOne({ phone });
+    if (existingPhoneUser) {
+      return res.status(409).json({
+        message: "Phone number already registered",
+      });
+    }
 
     const user = new User({
       fullName,
       email,
       password,
+      phone,
       role: role || "User",
       status: status || "active",
     });
 
+    // If an admin (or any authenticated user) is creating this user, record who created it
+    if (req.user && req.user.id) {
+      user.createdBy = req.user.id;
+      user.updatedBy = req.user.id; // initially same as createdBy
+    }
+
     await user.save();
+
     res.status(201).json({
       message: "User created successfully",
       user: safeUserResponse(user),
@@ -69,7 +142,7 @@ exports.updateUser = async (req, res, next) => {
     const requesterId = requester.id?.toString();
     const targetId = id.toString();
 
-    // Permission check
+    // 🔹 Permission check
     if (
       requesterId !== targetId &&
       !["Admin", "SuperAdmin"].includes(requester.role)
@@ -77,7 +150,7 @@ exports.updateUser = async (req, res, next) => {
       return res.status(403).json({ message: "Forbidden" });
     }
 
-    // Prevent role escalation
+    // 🔹 Prevent role escalation
     if (req.body.role === "SuperAdmin" && requester.role !== "SuperAdmin") {
       return res.status(403).json({
         message: "Only SuperAdmin can assign SuperAdmin role",
@@ -89,24 +162,99 @@ exports.updateUser = async (req, res, next) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // Email uniqueness check
-    if (req.body.email && req.body.email !== user.email) {
-      const conflict = await User.findOne({ email: req.body.email });
-      if (conflict) {
-        return res.status(400).json({ message: "Email already in use" });
+    const { fullName, email, phone, password, role, status } = req.body;
+
+    // =========================
+    // 🔹 Field-wise validations
+    // =========================
+
+    if (fullName !== undefined && !fullName.trim()) {
+      return res.status(400).json({ message: "Full name cannot be empty" });
+    }
+
+    if (email !== undefined) {
+      if (!email.trim()) {
+        return res.status(400).json({ message: "Email cannot be empty" });
+      }
+
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email)) {
+        return res.status(400).json({ message: "Invalid email format" });
+      }
+
+      // Email uniqueness
+      if (email !== user.email) {
+        const conflict = await User.findOne({ email });
+        if (conflict) {
+          return res.status(400).json({ message: "Email already in use" });
+        }
       }
     }
 
-    // ✅ Allowed updates
-    if (req.body.fullName !== undefined) user.fullName = req.body.fullName;
-    if (req.body.email !== undefined) user.email = req.body.email;
-    if (req.body.role !== undefined) user.role = req.body.role;
-    if (req.body.status !== undefined) user.status = req.body.status;
+    if (phone !== undefined) {
+      if (!phone.trim()) {
+        return res
+          .status(400)
+          .json({ message: "Phone number cannot be empty" });
+      }
 
-    // Password update (hashed by model)
-    if (req.body.password?.trim()) {
-      user.password = req.body.password;
+      if (!/^\+\d{10,15}$/.test(phone)) {
+        return res.status(400).json({ message: "Invalid phone number format" });
+      }
+
+      // Phone uniqueness
+      if (phone !== user.phone) {
+        const conflict = await User.findOne({ phone });
+        if (conflict) {
+          return res
+            .status(400)
+            .json({ message: "Phone number already in use" });
+        }
+      }
     }
+
+    if (password !== undefined) {
+      if (!password.trim()) {
+        return res.status(400).json({ message: "Password cannot be empty" });
+      }
+
+      if (password.length < 6) {
+        return res.status(400).json({
+          message: "Password must be at least 6 characters long",
+        });
+      }
+    }
+
+    if (role !== undefined) {
+      const allowedRoles = ["User", "Admin", "SuperAdmin"];
+      if (!allowedRoles.includes(role)) {
+        return res.status(400).json({ message: "Invalid role value" });
+      }
+    }
+
+    if (status !== undefined) {
+      const allowedStatus = ["active", "inactive", "blocked"];
+      if (!allowedStatus.includes(status)) {
+        return res.status(400).json({ message: "Invalid status value" });
+      }
+    }
+
+    // =========================
+    // ✅ Apply allowed updates
+    // =========================
+    if (fullName !== undefined) user.fullName = fullName;
+    if (email !== undefined) user.email = email;
+    if (phone !== undefined) user.phone = phone;
+    if (role !== undefined) user.role = role;
+    if (status !== undefined) user.status = status;
+
+    // Password update (hashed in model)
+    if (password?.trim()) {
+      user.password = password;
+    }
+
+    // Record who performed the update
+    user.updatedBy = requester.id;
 
     await user.save();
 
@@ -116,9 +264,7 @@ exports.updateUser = async (req, res, next) => {
     });
   } catch (error) {
     if (error.code === 11000) {
-      return res.status(400).json({
-        message: "Duplicate field value",
-      });
+      return res.status(400).json({ message: "Duplicate field value" });
     }
 
     if (error.name === "ValidationError") {
@@ -133,25 +279,59 @@ exports.updateUser = async (req, res, next) => {
 // ---------------------- Soft Delete User ----------------------
 exports.deleteUser = async (req, res, next) => {
   try {
+    const requester = req.user;
     const { id } = req.params;
 
+    // 🔹 Auth check
+    if (!requester) {
+      return res.status(401).json({ message: "Unauthorized" });
+    }
+
+    // 🔹 Only Admin & SuperAdmin can delete users
+    if (!["Admin", "SuperAdmin"].includes(requester.role)) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+
+    // 🔹 Validate MongoDB ObjectId
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid user ID" });
+    }
+
+    // 🔹 Prevent self-delete
+    if (requester.id === id) {
+      return res.status(400).json({
+        message: "You cannot delete your own account",
+      });
+    }
+
     const user = await User.findById(id);
+
     if (!user || user.status === "deleted") {
       return res.status(404).json({ message: "User not found" });
     }
 
-    // Soft delete by setting status to "deleted"
+    // 🔹 Prevent deleting SuperAdmin
+    if (user.role === "SuperAdmin" && requester.role !== "SuperAdmin") {
+      return res.status(403).json({
+        message: "Only SuperAdmin can delete a SuperAdmin",
+      });
+    }
+
+    // 🔹 Soft delete
     user.status = "deleted";
-    user.updatedBy = req.user.id;
+    user.updatedBy = requester.id;
 
     await user.save();
 
-    return res.json({ message: "User moved to deleted successfully" });
+    return res.json({
+      message: "User moved to deleted successfully",
+    });
   } catch (err) {
-    next(err);
+    return next(err);
   }
 };
 
+// ---------------------- Upload Profile Image ----------------------
 exports.uploadProfileImage = async (req, res) => {
   const user = req.dbUser; // already fetched
 
@@ -173,6 +353,7 @@ exports.uploadProfileImage = async (req, res) => {
   });
 };
 
+// ---------------------- Admin Upload User Profile Image ----------------------
 exports.uploadUserProfileImageByAdmin = async (req, res) => {
   try {
     const { id } = req.params; // target user id

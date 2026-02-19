@@ -11,14 +11,14 @@ const galleryUpload = require("../middleware/upload/cities/gallery.middleware");
 router.get(
   "/",
   auth,
-  authorizeRoles("SuperAdmin", "Admin", "Staff"),
+  authorizeRoles("SuperAdmin", "Admin", "Staff", "User"),
   citiesController.getAllCities,
 );
 // Get single city - Super Admin, Admin and Staff
 router.get(
   "/:id",
   auth,
-  authorizeRoles("SuperAdmin", "Admin", "Staff"),
+  authorizeRoles("SuperAdmin", "Admin", "Staff", "User"),
   citiesController.getCityById,
 );
 
@@ -63,6 +63,13 @@ router.delete(
   auth,
   authorizeRoles("SuperAdmin", "Admin", "Staff"),
   citiesController.deleteCityGalleryImage,
+);
+// Get cities by destination ID
+router.get(
+  "/destination/:destinationId",
+  auth,
+  authorizeRoles("SuperAdmin", "Admin", "Staff", "User"),
+  citiesController.getCitiesByDestination,
 );
 
 module.exports = router;

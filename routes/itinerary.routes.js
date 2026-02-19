@@ -1,39 +1,76 @@
-// backend/routes/itinerary.routes.js
 const express = require("express");
 const router = express.Router();
 const itineraryController = require("../controllers/itinerary.controller");
-const { authorizeRoles } = require("../middleware/auth/roles.middleware");
 const auth = require("../middleware/auth/auth.middleware");
+const { authorizeRoles } = require("../middleware/auth/roles.middleware");
 
-// Get Itinerary
+// All itinerary routes require authentication
+router.use(auth);
+
+// Initialize a new itinerary (step 5)
+router.post(
+  "/initialize",
+  authorizeRoles("User", "SuperAdmin", "Admin", "Staff"), // adjust roles
+  itineraryController.initializeItinerary,
+);
+
+router.get(
+  "/user",
+  authorizeRoles("User", "SuperAdmin", "Admin", "Staff"), // all authenticated users
+  itineraryController.getMyItineraries,
+);
+
+// Get itinerary by ID
 router.get(
   "/:id",
-  auth,
-  authorizeRoles("SuperAdmin", "Admin", "Staff", "User"),
+  authorizeRoles("User", "SuperAdmin", "Admin", "Staff"),
   itineraryController.getItinerary,
 );
 
-// Update Itinerary
+// Update activities for a specific day
 router.put(
-  "/:id",
-  auth,
-  authorizeRoles("SuperAdmin", "Admin", "Staff", "User"),
-  itineraryController.updateItinerary,
+  "/:id/activities",
+  authorizeRoles("User", "SuperAdmin", "Admin", "User"),
+  itineraryController.updateActivities,
 );
 
-// Create new Itinerary - Super Admin, Admin and Staff
+// Recalculate price
 router.post(
-  "/",
-  auth,
-  authorizeRoles("SuperAdmin", "Admin", "Staff", "User"),
-  itineraryController.buildItinerary,
+  "/:id/calculate-price",
+  authorizeRoles("User", "SuperAdmin", "Admin", "User"),
+  itineraryController.recalculatePrice,
 );
 
+// Book itinerary (final step)
+router.post(
+  "/:id/book",
+  authorizeRoles("User", "SuperAdmin", "Admin", "User"),
+  itineraryController.bookItinerary,
+);
+
+/**
+ * GET /api/itinerary
+ * Get all itineraries – Admin only (or own for regular users)
+ */
 router.get(
   "/",
-  auth,
-  authorizeRoles("SuperAdmin", "Admin", "Staff", "User"),
+  authorizeRoles("SuperAdmin", "Admin", "Staff", "User"), // User sees only theirs
   itineraryController.getAllItineraries,
+);
+
+
+// Mark itinerary as booked
+router.post(
+  "/:id/booked",
+  authorizeRoles("User", "SuperAdmin", "Admin", "Staff"),
+  itineraryController.markAsBooked,
+);
+
+// Soft delete itinerary
+router.delete(
+  "/:id",
+  authorizeRoles("User", "SuperAdmin", "Admin", "Staff"),
+  itineraryController.deleteItinerary,
 );
 
 module.exports = router;

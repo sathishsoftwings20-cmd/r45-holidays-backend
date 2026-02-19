@@ -10,14 +10,14 @@ const resolveDestination = require("../middleware/upload/destination/resolveDest
 router.get(
   "/",
   auth,
-  authorizeRoles("SuperAdmin", "Admin", "Staff"),
+  authorizeRoles("SuperAdmin", "Admin", "Staff", "User"),
   destinationController.getAllDestination,
 );
 // Get single destination - Super Admin, Admin and Staff
 router.get(
   "/:id",
   auth,
-  authorizeRoles("SuperAdmin", "Admin", "Staff"),
+  authorizeRoles("SuperAdmin", "Admin", "Staff", "User"),
   destinationController.getDestinationById,
 );
 

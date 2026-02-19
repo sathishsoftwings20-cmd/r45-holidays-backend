@@ -23,8 +23,6 @@ const userSchema = new mongoose.Schema({
     lowercase: true,
     match: [/.+@.+\..+/, "Please fill a valid email address"],
   },
-
-  // 🔮 Future mobile app login
   phone: {
     type: String,
     unique: true,

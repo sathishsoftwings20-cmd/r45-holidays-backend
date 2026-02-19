@@ -12,6 +12,9 @@ logs/
 uploads/
 public/uploads/
 
+#file
+scripts/seedAdmin.js
+
 # OS files
 .DS_Store
 Thumbs.db

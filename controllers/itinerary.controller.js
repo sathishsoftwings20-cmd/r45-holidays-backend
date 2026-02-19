@@ -1,253 +1,443 @@
-// backend/controllers/itinerary.controller.js
 const Itinerary = require("../models/itinerary.model");
-const Activity = require("../models/activities.model");
 const Cities = require("../models/cities.model");
+const Activity = require("../models/activities.model");
+const itineraryService = require("../services/itinerary.service");
+const { getActivityWeight } = require("../services/itinerary.service");
+const { convertINRtoUSDForDisplay } = require("../services/currency.service");
 
 /**
- * Activity weight:
- * Qurate Day -> quarter day (0.25)
- * Half Day -> 0.5
- * Full Day / Overnight -> 1
+ * POST /api/itinerary/initialize
  */
-function getActivityWeight(badge) {
-  switch (badge) {
-    case "Qurate Day":
-      return 0.25;
-    case "Half Day":
-      return 0.5;
-    case "Full Day":
-    case "Overnight":
-      return 1;
-    default:
-      return 0.25;
-  }
-}
-
-/**
- * Distribute activities city-by-city, finishing all activities in a city before moving
- * to the next city. Activities are consumed once (no duplicates).
- *
- * - cities: array of city documents (in desired visiting order)
- * - activitiesMap: { [cityIdString]: [activityDoc, ...] }
- * - totalDays: total days available
- */
-function distributeActivities(cities, activitiesMap, totalDays) {
-  const days = [];
-  let dayNumber = 1;
-
-  for (const city of cities) {
-    const cityActivities = activitiesMap[city._id.toString()] || [];
-    let activityIndex = 0;
-
-    while (activityIndex < cityActivities.length && dayNumber <= totalDays) {
-      let dayCost = 0;
-      let usedDayFraction = 0;
-      const activitiesForDay = [];
-
-      while (activityIndex < cityActivities.length) {
-        const act = cityActivities[activityIndex];
-
-        // Determine duration
-        const duration =
-          act.badge === "Full Day"
-            ? 1
-            : act.badge === "Quarter Day"
-              ? 0.25
-              : 0.5;
-
-        // If day is full, break
-        if (usedDayFraction + duration > 1) break;
-
-        activitiesForDay.push({
-          activityId: act._id,
-          name: act.name,
-          badge: act.badge,
-          price: act.price,
-          startTime: act.startTime,
-          duration,
-        });
-
-        usedDayFraction += duration;
-        dayCost += act.price;
-        activityIndex++;
-      }
-
-      days.push({
-        day: dayNumber,
-        city: city._id, // ✅ ALWAYS present
-        cityName: city.name,
-        activities: activitiesForDay,
-        totalDayCost: dayCost,
-      });
-
-      dayNumber++;
-    }
-  }
-
-  return days;
-}
-
-// POST /api/itinerary/build
-exports.buildItinerary = async (req, res) => {
+exports.initializeItinerary = async (req, res, next) => {
   try {
-    // incoming payload may include userId (admin) or not (app user)
-    let { userId: bodyUserId, destinationId, cityIds, totalDays } = req.body;
+    const {
+      destination,
+      travelType,
+      rooms,
+      totalTravelers,
+      departureCity,
+      departureDate,
+      selectedPackage,
+      cityIds,
+    } = req.body;
 
-    // req.user is set by auth middleware (JWT)
-    const caller = req.user;
-    if (!caller) {
-      return res.status(401).json({ message: "Unauthorized" });
-    }
-
-    // Basic validation
-    if (!Array.isArray(cityIds) || cityIds.length === 0 || !totalDays) {
+    if (
+      !destination ||
+      !travelType ||
+      !departureDate ||
+      !selectedPackage ||
+      !cityIds?.length
+    ) {
       return res.status(400).json({ message: "Missing required fields" });
     }
 
-    // If caller is admin/staff/superadmin they can specify `userId`, otherwise ignore body userId and use caller
-    const isAdminCaller =
-      typeof caller.role === "string" &&
-      ["SuperAdmin", "Admin", "Staff"].includes(caller.role);
+    const packageDaysMap = { "7-8": 8, "9-10": 10, "11-12": 12, "13-14": 14 };
+    const totalDays = packageDaysMap[selectedPackage];
+    if (!totalDays) return res.status(400).json({ message: "Invalid package" });
 
-    const ownerUserId = isAdminCaller && bodyUserId ? bodyUserId : caller._id;
+    // Compute total travelers if not provided
+    const computedTotalTravelers = totalTravelers || rooms.reduce(
+      (sum, room) => sum + room.adults + (room.children || 0),
+      0
+    );
+    const cityAllocations = await itineraryService.allocateDays(
+      totalDays,
+      cityIds,
+    );
+    const days = await itineraryService.generateFlightActivities(
+      cityAllocations,
+      new Date(departureDate),
+    );
 
-    // Fetch cities (published)
-    const cities = await Cities.find({
-      _id: { $in: cityIds },
-      status: "published",
+    const itinerary = new Itinerary({
+      user: req.user.id,
+      destination,
+      travelType,
+      rooms: rooms || [],
+      totalTravelers: computedTotalTravelers,
+      departureCity,
+      departureDate: new Date(departureDate),
+      selectedPackage,
+      totalDays,
+      cityAllocations,
+      days,
+      status: "draft",
     });
 
-    if (!cities.length) {
-      return res.status(400).json({ message: "No valid cities found" });
+    // ✅ Calculate pricing before saving
+    itinerary.pricing = await itineraryService.calculatePricing(itinerary);
+
+    // ✅ Save to database
+    await itinerary.save();
+
+    // ✅ Now populate (document exists)
+    const populated = await Itinerary.findById(itinerary._id)
+      .populate("destination", "name destinationId")
+      .populate("cityAllocations.city", "name cityId")
+      .populate("days.activities.activity");
+
+    const itObj = populated.toObject();
+
+    // Add USD pricing fields
+    itObj.totalCostUSD = await convertINRtoUSDForDisplay(
+      itObj.pricing.totalCost,
+    );
+    itObj.perPersonCostUSD = await convertINRtoUSDForDisplay(
+      itObj.pricing.perPersonCost,
+    );
+
+    res.status(201).json({
+      message: "Itinerary initialized successfully",
+      itinerary: itObj,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * GET /api/itinerary/:id
+ */
+exports.getItinerary = async (req, res, next) => {
+  try {
+    const itinerary = await Itinerary.findById(req.params.id)
+      .populate("destination", "name destinationId")
+      .populate("cityAllocations.city", "name cityId")
+      .populate("days.activities.activity");
+
+    if (!itinerary)
+      return res.status(404).json({ message: "Itinerary not found" });
+
+    const itObj = itinerary.toObject();
+
+    // ✅ Add USD price fields
+    itObj.totalCostUSD = await convertINRtoUSDForDisplay(
+      itObj.pricing.totalCost,
+    );
+    itObj.perPersonCostUSD = await convertINRtoUSDForDisplay(
+      itObj.pricing.perPersonCost,
+    );
+
+    res.json(itObj);
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * PUT /api/itinerary/:id/activities
+ * Update activities for a specific day (add/remove/reorder) – flights are preserved.
+ */
+exports.updateActivities = async (req, res, next) => {
+  try {
+    const { dayNumber, activities } = req.body;
+    const itinerary = await Itinerary.findById(req.params.id);
+    if (!itinerary)
+      return res.status(404).json({ message: "Itinerary not found" });
+
+    const day = itinerary.days.find((d) => d.dayNumber === dayNumber);
+    if (!day) return res.status(404).json({ message: "Day not found" });
+
+    // -----------------------------------------------------------------
+    // 1. Preserve flight activities
+    // -----------------------------------------------------------------
+    const existingFlights = day.activities.filter(
+      (act) => act.isFlight === true,
+    );
+    const requestedActivityIds = activities.map((a) => a.activityId.toString());
+
+    // Fetch requested activities to validate
+    const requestedActivities = await Activity.find({
+      _id: { $in: requestedActivityIds },
+    }).lean();
+
+    // 2. Prevent manual modification of flights
+    const requestedFlightIds = requestedActivities
+      .filter((a) => a.isFlight === true)
+      .map((a) => a._id.toString());
+
+    if (requestedFlightIds.length > 0) {
+      return res.status(400).json({
+        message:
+          "Flight activities cannot be added, removed, or modified manually.",
+      });
     }
 
-    // If destinationId wasn't provided, attempt to infer from first city
-    if (!destinationId) {
-      const firstCity = cities[0];
-      if (firstCity && firstCity.destination) {
-        destinationId = firstCity.destination;
+    // 3. Duplicate checks within same day
+    if (new Set(requestedActivityIds).size !== requestedActivityIds.length) {
+      return res.status(400).json({
+        message:
+          "Duplicate non‑flight activities detected in your request for the same day.",
+      });
+    }
+
+    // 4. Duplicate checks across other days
+    const otherDaysNonFlightIds = itinerary.days
+      .filter((d) => d.dayNumber !== dayNumber)
+      .flatMap((d) =>
+        d.activities
+          .filter((act) => act.isFlight !== true)
+          .map((act) => act.activity.toString()),
+      );
+
+    for (const actId of requestedActivityIds) {
+      if (otherDaysNonFlightIds.includes(actId)) {
+        const act = await Activity.findById(actId).lean();
+        return res.status(400).json({
+          message: `Activity "${act?.name || actId}" is already scheduled on another day.`,
+        });
       }
     }
 
-    if (!destinationId) {
-      return res
-        .status(400)
-        .json({ message: "destinationId is required or cannot be inferred" });
+    // 5. Build new non‑flight activities from request
+    let totalNonFlightWeight = 0;
+    const newNonFlights = [];
+
+    for (const item of activities) {
+      const activity = requestedActivities.find(
+        (a) => a._id.toString() === item.activityId.toString(),
+      );
+      if (!activity) continue;
+
+      // City validation
+      if (activity.city.toString() !== day.city.toString()) {
+        return res.status(400).json({
+          message: `Activity "${activity.name}" does not belong to the city assigned to this day.`,
+        });
+      }
+
+      const weight = getActivityWeight(activity.badge);
+      const flightCapacityUsed = existingFlights.reduce(
+        (sum, f) => sum + (f.durationWeight || 0.25),
+        0,
+      );
+
+      if (flightCapacityUsed + totalNonFlightWeight + weight > 1.0) {
+        return res.status(400).json({
+          message: `Cannot add activity "${activity.name}" – exceeds day capacity.`,
+        });
+      }
+
+      newNonFlights.push({
+        activity: activity._id,
+        name: activity.name,
+        durationWeight: weight,
+        startTime: item.startTime || activity.startTime || "09:00",
+        price: activity.price || 0,
+        transferCharge: activity.transferCharge || 0, // ✅ FIX: correct field name
+        city: activity.city,
+        isFlight: false,
+        flightType: null,
+        order: item.order || newNonFlights.length + 1 + existingFlights.length,
+      });
+
+      totalNonFlightWeight += weight;
     }
 
-    // Fetch activities for the selected cities (published)
-    const activities = await Activity.find({
-      city: { $in: cityIds },
-      status: "published",
+    // 6. Combine flights + new non‑flights, reorder
+    const orderedFlights = existingFlights.sort((a, b) => a.order - b.order);
+    const finalActivities = [];
+
+    orderedFlights.forEach((f, idx) => {
+      finalActivities.push({ ...f, order: idx + 1 });
+    });
+    newNonFlights.forEach((nf, idx) => {
+      nf.order = orderedFlights.length + idx + 1;
+      finalActivities.push(nf);
     });
 
-    // Map activities by city id string (so keys are consistent)
-    const activitiesMap = {};
-    activities.forEach((act) => {
-      const key = String(act.city);
-      if (!activitiesMap[key]) activitiesMap[key] = [];
-      activitiesMap[key].push(act);
+    day.activities = finalActivities;
+    day.capacityUsed =
+      orderedFlights.reduce((sum, f) => sum + (f.durationWeight || 0.25), 0) +
+      totalNonFlightWeight;
+
+    // 7. Recalculate pricing
+    itinerary.pricing = await itineraryService.calculatePricing(itinerary);
+    await itinerary.save();
+
+    // ✅ POPULATE before sending to frontend
+    const populated = await Itinerary.findById(itinerary._id)
+      .populate("destination", "name destinationId")
+      .populate("cityAllocations.city", "name cityId")
+      .populate("days.activities.activity");
+
+    res.json({
+      message: "Activities updated (flights preserved)",
+      itinerary: populated,
     });
+  } catch (err) {
+    next(err);
+  }
+};
 
-    // Optional: sort activities per city by badge (Full day first, then half, then quarter) or any business rule.
-    Object.keys(activitiesMap).forEach((k) => {
-      activitiesMap[k].sort((a, b) => {
-        const wA = getActivityWeight(a.badge);
-        const wB = getActivityWeight(b.badge);
-        return wB - wA; // larger weights first
-      });
+/**
+ * POST /api/itinerary/:id/calculate-price
+ * Recalculate price (useful after any change)
+ */
+exports.recalculatePrice = async (req, res, next) => {
+  try {
+    const itinerary = await Itinerary.findById(req.params.id);
+    if (!itinerary)
+      return res.status(404).json({ message: "Itinerary not found" });
+
+    itinerary.pricing = await itineraryService.calculatePricing(itinerary);
+    await itinerary.save();
+
+    res.json({ pricing: itinerary.pricing });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * POST /api/itinerary/:id/book
+ * Final step – confirm booking
+ */
+exports.bookItinerary = async (req, res, next) => {
+  try {
+    const itinerary = await Itinerary.findById(req.params.id);
+    if (!itinerary)
+      return res.status(404).json({ message: "Itinerary not found" });
+
+    itinerary.status = "confirmed";
+    await itinerary.save();
+
+    res.json({
+      message: "Itinerary confirmed",
+      itineraryId: itinerary.itineraryId,
     });
+  } catch (err) {
+    next(err);
+  }
+};
 
-    // Ensure cities are ordered as user selected (cityIds order)
-    const orderedCities = cityIds
-      .map((id) => cities.find((c) => c._id.toString() === String(id)))
-      .filter(Boolean);
+/**
+ * GET /api/itinerary
+ * Get all itineraries – Admin only (or filtered by user) – excludes deleted
+ */
+exports.getAllItineraries = async (req, res, next) => {
+  try {
+    let query = { status: { $ne: "deleted" } }; // Exclude deleted
 
-    // Distribute activities
-    const days = distributeActivities(orderedCities, activitiesMap, totalDays);
+    const userRole = req.user?.role;
+    if (!["SuperAdmin", "Admin", "Staff"].includes(userRole)) {
+      query.user = req.user.id;
+    }
 
-    // Calculate total cost
-    const totalCost = days.reduce(
-      (sum, day) => sum + (day.totalDayCost || 0),
-      0,
+    const itineraries = await Itinerary.find(query)
+      .populate("user", "name email")
+      .populate("destination", "name")
+      .populate("cityAllocations.city", "name")
+      .sort({ createdAt: -1 });
+
+    const formatted = await Promise.all(
+      itineraries.map(async (it) => {
+        const obj = it.toObject();
+        if (obj.pricing) {
+          obj.totalCostUSD = await convertINRtoUSDForDisplay(
+            obj.pricing.totalCost,
+          );
+          obj.perPersonCostUSD = await convertINRtoUSDForDisplay(
+            obj.pricing.perPersonCost,
+          );
+        }
+        return obj;
+      }),
     );
 
-    // Create and persist itinerary (draft)
-    const itinerary = new Itinerary({
-      user: ownerUserId,
-      destination: destinationId,
-      cities: cityIds,
-      totalDays,
-      days,
-      totalCost,
-      status: "draft",
-      createdBy: caller._id,
-      updatedBy: caller._id,
-    });
-
-    await itinerary.save();
-
-    return res.json({
-      message: "Itinerary built successfully",
-      itinerary,
-    });
+    res.json(formatted);
   } catch (err) {
-    console.error("buildItinerary error:", err);
-    return res
-      .status(500)
-      .json({ message: "Server error", error: err.message || err });
+    next(err);
   }
 };
 
-// PUT /api/itinerary/:id
-exports.updateItinerary = async (req, res) => {
+/**
+ * GET /api/itinerary/user
+ * Get all itineraries for the currently logged-in user – excludes deleted
+ */
+exports.getMyItineraries = async (req, res, next) => {
   try {
-    const { id } = req.params;
-    const updates = req.body;
-
-    const itinerary = await Itinerary.findById(id);
-    if (!itinerary)
-      return res.status(404).json({ message: "Itinerary not found" });
-
-    Object.assign(itinerary, updates);
-    itinerary.updatedAt = new Date();
-    await itinerary.save();
-
-    return res.json({ message: "Itinerary updated", itinerary });
-  } catch (err) {
-    console.error(err);
-    return res
-      .status(500)
-      .json({ message: "Server error", error: err.message });
-  }
-};
-
-// GET /api/itinerary/:id
-exports.getItinerary = async (req, res) => {
-  try {
-    const itinerary = await Itinerary.findById(req.params.id)
-      .populate("user", "fullName email")
+    const itineraries = await Itinerary.find({
+      user: req.user.id,
+      status: { $ne: "deleted" }
+    })
       .populate("destination", "name")
-      .populate("cities", "name");
-    if (!itinerary)
-      return res.status(404).json({ message: "Itinerary not found" });
-    return res.json(itinerary);
+      .populate("cityAllocations.city", "name")
+      .sort({ createdAt: -1 });
+
+    const formatted = await Promise.all(
+      itineraries.map(async (it) => {
+        const obj = it.toObject();
+        if (obj.pricing) {
+          obj.totalCostUSD = await convertINRtoUSDForDisplay(
+            obj.pricing.totalCost,
+          );
+          obj.perPersonCostUSD = await convertINRtoUSDForDisplay(
+            obj.pricing.perPersonCost,
+          );
+        }
+        return obj;
+      }),
+    );
+
+    res.json(formatted);
   } catch (err) {
-    console.error(err);
-    return res
-      .status(500)
-      .json({ message: "Server error", error: err.message });
+    next(err);
   }
 };
 
-// GET /api/itinerary
-exports.getAllItineraries = async (req, res) => {
-  const query = req.user.role === "User" ? { user: req.user.id } : {};
+/**
+ * POST /api/itinerary/:id/booked
+ * Mark itinerary as booked (after booking record created)
+ */
+exports.markAsBooked = async (req, res, next) => {
+  try {
+    const itinerary = await Itinerary.findById(req.params.id);
+    if (!itinerary) {
+      return res.status(404).json({ message: "Itinerary not found" });
+    }
 
-  const itineraries = await Itinerary.find(query)
-    .populate("destination", "name")
-    .populate("cities", "name")
-    .sort({ createdAt: -1 });
+    // Optional: check if user owns the itinerary or is admin
+    if (itinerary.user.toString() !== req.user.id && !["SuperAdmin", "Admin", "Staff"].includes(req.user.role)) {
+      return res.status(403).json({ message: "Access denied" });
+    }
 
-  res.json(itineraries);
+    itinerary.status = "booked";
+    await itinerary.save();
+
+    res.json({
+      message: "Itinerary marked as booked",
+      itineraryId: itinerary.itineraryId,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * DELETE /api/itinerary/:id
+ * Soft delete itinerary – set status to "deleted"
+ */
+exports.deleteItinerary = async (req, res, next) => {
+  try {
+    const itinerary = await Itinerary.findById(req.params.id);
+    if (!itinerary) {
+      return res.status(404).json({ message: "Itinerary not found" });
+    }
+
+    // Check ownership or admin
+    if (itinerary.user.toString() !== req.user.id && !["SuperAdmin", "Admin", "Staff"].includes(req.user.role)) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    itinerary.status = "deleted";
+    await itinerary.save();
+
+    res.json({
+      message: "Itinerary deleted successfully",
+      itineraryId: itinerary.itineraryId,
+    });
+  } catch (err) {
+    next(err);
+  }
 };

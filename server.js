@@ -3,10 +3,9 @@ const dotenv = require("dotenv");
 const cors = require("cors");
 const path = require("path");
 const multer = require("multer");
-
 // Load environment variables
 dotenv.config();
-
+require("./cron/currency.cron");
 // Database connection
 const connectDB = require("./config/db");
 connectDB();
@@ -16,6 +15,7 @@ const app = express();
 // CORS Configuration
 const allowedOrigins = [
   process.env.FRONTEND_URL,
+  "http://localhost:5174",
   "http://localhost:5173",
   "http://localhost:3000",
   "http://localhost:8080",
@@ -70,8 +70,9 @@ app.use("/api/users", require("./routes/user.routes"));
 app.use("/api/destinations", require("./routes/destination.routes"));
 app.use("/api/cities", require("./routes/cities.routes"));
 app.use("/api/activities", require("./routes/activities.routes"));
+app.use("/api/currency", require("./routes/currency.routes"));
 app.use("/api/itinerary", require("./routes/itinerary.routes"));
-
+app.use("/api/bookings", require("./routes/booking.routes"));
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);

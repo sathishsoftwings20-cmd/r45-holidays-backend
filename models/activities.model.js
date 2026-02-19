@@ -7,6 +7,26 @@ const GalleryImageSchema = new mongoose.Schema({
   caption: { type: String, trim: true },
 });
 
+// Transfer Schema 
+const TransferSchema = new mongoose.Schema({
+  type: {
+    type: String,
+    enum: [
+      "Airport Pickup",
+      "Airport Drop",
+      "Intercity Transfer",
+      "Local Transport",
+    ],
+    required: true,
+  },
+  vehicleType: {
+    type: String,
+    enum: ["Sedan", "SUV", "Tempo Traveller", "Bus", "Private Cab"],
+    default: "Sedan",
+  },
+  price: { type: Number, default: 0 }, // INR only
+});
+
 const ActivitySchema = new mongoose.Schema({
   activityId: { type: String, unique: true, index: true },
   name: { type: String, required: true, trim: true, index: true },
@@ -14,19 +34,9 @@ const ActivitySchema = new mongoose.Schema({
   startTime: { type: String, trim: true },
   duration: { type: String, trim: true },
   description: { type: String, trim: true },
-  inclusion: {
-    type: [String],
-    default: [],
-    trim: true,
-  },
-
-  exclusion: {
-    type: [String],
-    default: [],
-    trim: true,
-  },
-  price: { type: Number, default: 0 },
-
+  inclusion: { type: [String], default: [], trim: true },
+  exclusion: { type: [String], default: [], trim: true },
+  price: { type: Number, default: 0 }, // INR only
   badge: {
     type: String,
     enum: ["Half Day", "Full Day", "Overnight", "Qurate Day"],
@@ -37,6 +47,7 @@ const ActivitySchema = new mongoose.Schema({
     default: "/uploads/defaults/default-activity.png",
   },
   gallery: { type: [GalleryImageSchema], default: [] },
+  transfer: { type: [TransferSchema], default: [] },
   status: {
     type: String,
     enum: ["draft", "published", "deleted"],
@@ -50,22 +61,33 @@ const ActivitySchema = new mongoose.Schema({
     required: true,
     index: true,
   },
+  isFlight: {
+    type: Boolean,
+    default: false,
+    index: true,
+  },
+  flightType: {
+    type: String,
+    enum: ["departure", "return", null],
+    default: null,
+    index: true,
+  },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
 });
 
-// pre-save: lazy require Counter inside the hook
 ActivitySchema.pre("save", async function (next) {
   try {
     this.updatedAt = Date.now();
+
 
     if (!this.activityId) {
       const counter = await Counter.findByIdAndUpdate(
         { _id: "activityId" },
         { $inc: { seq: 1 } },
-        { new: true, upsert: true },
+        { new: true, upsert: true }
       );
       this.activityId = `ACT${String(counter.seq).padStart(4, "0")}`;
     }
